@@ -9,6 +9,13 @@ use jj_lib::config::{ConfigGetError, StackedConfig};
 
 type Rules = Vec<(Vec<String>, Style)>;
 
+fn default_format() -> TextFormat {
+    TextFormat {
+        line_height: Some(20.0),
+        ..Default::default()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ColorFormatter {
     egui_output: LayoutJob,
@@ -31,7 +38,7 @@ impl ColorFormatter {
     pub fn new(rules: Arc<Rules>, debug: bool) -> ColorFormatter {
         ColorFormatter {
             egui_output: LayoutJob::default(),
-            egui_format: egui::TextFormat::default(),
+            egui_format: default_format(),
             output: Vec::new(),
             rules,
             labels: vec![],
@@ -48,8 +55,7 @@ impl ColorFormatter {
 
     pub fn take(&mut self) -> LayoutJob {
         self.flush_to_egui();
-        self.egui_format = TextFormat::default();
-        self.egui_format = TextFormat::default();
+        self.egui_format = default_format();
         self.current_style = Style::default();
 
         let mut output = std::mem::take(&mut self.egui_output);
@@ -130,7 +136,7 @@ impl ColorFormatter {
                     // below.
                     // queue!(self.output, SetAttribute(Attribute::Reset))?;
                     self.current_style = Style::default();
-                    self.egui_format = TextFormat::default();
+                    self.egui_format = default_format();
                 }
             }
             if new_style.italic != self.current_style.italic {

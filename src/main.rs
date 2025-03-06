@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::borrow::Cow;
+use std::io::Write;
+use std::ops::Not;
 use std::path::Path;
 
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
 use egui::{Pos2, Rect, Stroke, StrokeKind, Vec2};
-use jj_cli::formatter::{FormatRecorder, PlainTextFormatter};
+use jj_cli::formatter::{FormatRecorder, Formatter, PlainTextFormatter};
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigGetError, ConfigGetResultExt};
 use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
@@ -32,7 +34,7 @@ fn setup_custom_style(ctx: &egui::Context) {
 }
 
 struct CommitNode {
-    commit_id: CommitId,
+    commit_id: Option<CommitId>,
     msg: FormatRecorder,
     row: GraphRow<(CommitId, bool)>,
 }
@@ -40,7 +42,8 @@ struct CommitNode {
 //
 
 fn load() -> Result<MyApp> {
-    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+    // let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/diffpatch"))?.unwrap();
     let log_revset = repo.settings().get_string("revsets.log")?;
 
     let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
@@ -92,7 +95,6 @@ fn load() -> Result<MyApp> {
         if let Some(missing_edge_id) = missing_edge_id {
             graphlog_edges.push(GraphEdge::missing((missing_edge_id, false)));
         }
-        let buffer = vec![];
         let key = (commit_id.clone(), false);
         let commit = repo.commit(&key.0)?;
 
@@ -103,29 +105,43 @@ fn load() -> Result<MyApp> {
         let node_symbol = "o";
 
         let edges = graphlog_edges.iter().map(convert_graph_edge_into_ancestor).collect();
-        let row = graph.next_row(key, edges, node_symbol.into(), String::from_utf8_lossy(&buffer).into());
-
+        let row = graph.next_row(key, edges, node_symbol.into(), String::new());
         let mut f = FormatRecorder::new();
         log_template.format(&commit, &mut f)?;
+        nodes.push(CommitNode {
+            commit_id: Some(commit_id),
+            msg: f,
+            row,
+        });
 
-        nodes.push(CommitNode { commit_id, msg: f, row });
-        /*for elided_target in elided_targets {
-            let elided_key = (elided_target, true);
+        for elided_target in elided_targets {
+            let elided_key = (elided_target.clone(), true);
             let real_key = (elided_key.0.clone(), false);
             let edges = [GraphEdge::direct(real_key)];
-            let mut buffer = vec![];
-            let within_graph = with_content_format.sub_width(graph.width(&elided_key, &edges));
-            within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
-                writeln!(formatter.labeled("elided"), "(elided revisions)")
-            })?;
-            let node_symbol = format_template(ui, &None, &node_template);
-            graph.add_node(
-                &elided_key,
-                &edges,
-                &node_symbol,
-                &String::from_utf8_lossy(&buffer),
-            )?;
-        }*/
+
+            let mut node_out = Vec::new();
+            let mut f = PlainTextFormatter::new(&mut node_out);
+            node_template.format(&Some(commit.clone()), &mut f)?;
+            let _node_symbol = String::from_utf8(node_out)?;
+            let node_symbol = "o";
+
+            let edges = edges.iter().map(convert_graph_edge_into_ancestor).collect();
+            let row = graph.next_row(
+                elided_key,
+                edges,
+                node_symbol.to_owned(),
+                "(elided revisions)".to_owned(),
+            );
+            let mut f = FormatRecorder::new();
+            f.push_label("elided")?;
+            f.write_all(b"(elided revisions)")?;
+            f.pop_label()?;
+            nodes.push(CommitNode {
+                commit_id: None,
+                msg: f,
+                row,
+            });
+        }
     }
 
     /*for commit in iter {
@@ -164,7 +180,7 @@ impl MyApp {
     }
 }
 
-const GRAPH_CELL_SIZE: Vec2 = Vec2::new(16.0, 16.0);
+const GRAPH_CELL_SIZE: Vec2 = Vec2::new(16.0, 20.0);
 const GRAPH_STROKE: Stroke = Stroke {
     width: 1.,
     color: Color32::WHITE,
@@ -178,13 +194,15 @@ impl eframe::App for MyApp {
             let mut prev_link_line = None;
             let mut first = true;
             for node in &content.nodes {
+                let line = &node.row;
+
                 self.draw_line_row(ui, &node, prev_link_line, first);
 
-                if let Some(link_row) = &node.row.link_line {
+                if let Some(link_row) = &line.link_line {
                     self.draw_line_link(ui, link_row);
                 }
 
-                if let Some(term_row) = &node.row.term_line {
+                if let Some(term_row) = &line.term_line {
                     let (response, painter) = ui.allocate_painter(
                         GRAPH_CELL_SIZE * Vec2::new(term_row.len() as f32, 1.0),
                         egui::Sense::empty(),
@@ -200,7 +218,7 @@ impl eframe::App for MyApp {
                     }
                 }
 
-                prev_link_line = node.row.link_line.as_deref();
+                prev_link_line = line.link_line.as_deref();
                 first = false;
             }
         });
@@ -252,10 +270,16 @@ impl MyApp {
                 }
             }
 
-            ui.dnd_drag_source(egui::Id::new(&node.commit_id), node.commit_id.clone(), |ui| {
+            let mut msg = |ui: &mut egui::Ui| {
                 node.msg.replay(&mut self.formatter).unwrap();
                 ui.label(self.formatter.take());
-            })
+            };
+
+            if let Some(commit_id) = &node.commit_id {
+                ui.dnd_drag_source(egui::Id::new(commit_id), node.commit_id.clone(), msg);
+            } else {
+                msg(ui);
+            }
         });
     }
 
