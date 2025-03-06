@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use crate::backend::{CommitNode, RepoState};
@@ -15,7 +17,7 @@ mod jj;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([100.0, 100.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1200., 400.]),
         ..Default::default()
     };
     eframe::run_native("kahva", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -30,6 +32,7 @@ fn load() -> Result<App> {
         formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
         repo,
         style: AppStyle::default(),
+        initial_sized: false,
     })
 }
 
@@ -39,12 +42,14 @@ struct App {
     formatter: egui_formatter::ColorFormatter,
     content: RepoState,
     style: AppStyle,
+
+    initial_sized: bool,
 }
 
 fn setup_custom_style(ctx: &egui::Context) {
     ctx.set_pixels_per_point(1.2);
     ctx.style_mut_of(Theme::Dark, |style| {
-        style.visuals.panel_fill = Color32::from_rgb(43, 43, 46);
+        style.visuals.panel_fill = Color32::from_rgb(11, 11, 22);
     });
 }
 
@@ -66,7 +71,7 @@ impl Default for AppStyle {
             graph_cell_size: Vec2::new(16.0, 20.0),
             graph_stroke: Stroke {
                 width: 1.,
-                color: Color32::WHITE,
+                color: Color32::from_rgb(104, 148, 187),
             },
         }
     }
@@ -75,6 +80,12 @@ impl Default for AppStyle {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let content = std::mem::take(&mut self.content);
+
+        #[cfg(any())]
+        egui::Window::new("Theme")
+            .fixed_pos(ctx.used_size().to_pos2())
+            .default_open(false)
+            .show(ctx, |ui| theme_window(ctx, ui, &mut self.style));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             for node in &content.nodes {
@@ -105,7 +116,12 @@ impl eframe::App for App {
         });
 
         self.content = content;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ctx.used_size()));
+
+        let used_size = ctx.used_size();
+        if !self.initial_sized && used_size.x > 0. && used_size.x < 5000. {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(used_size));
+            self.initial_sized = true;
+        }
     }
 }
 impl App {
@@ -221,4 +237,47 @@ fn rect_subdiv_x(rect: Rect, n_x: usize, i: usize) -> Rect {
         Pos2::new(rect.min.x + w * i as f32, rect.min.y),
         Vec2::new(w, rect.height()),
     )
+}
+
+#[allow(dead_code)]
+fn theme_window(ctx: &egui::Context, ui: &mut egui::Ui, style: &mut AppStyle) {
+    egui::Grid::new("settings").show(ui, |ui| {
+        const POSITIVE: RangeInclusive<f32> = 1.0..=f32::MAX;
+        ui.label("Size (x)");
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut style.graph_cell_size.x).range(POSITIVE));
+            ui.add(egui::DragValue::new(&mut style.graph_cell_size.y).range(POSITIVE));
+        });
+        ui.end_row();
+        ui.label("Stroke Width");
+        ui.add(
+            egui::DragValue::new(&mut style.graph_stroke.width)
+                .range(0.1..=5.0)
+                .speed(0.01),
+        );
+        ui.end_row();
+        ui.label("Stroke Color");
+        ui.color_edit_button_srgba(&mut style.graph_stroke.color);
+        ui.end_row();
+
+        ui.label("Background Color");
+        let mut bg = ctx.style().visuals.panel_fill;
+        if ui.color_edit_button_srgba(&mut bg).changed() {
+            ctx.style_mut(|style| style.visuals.panel_fill = bg);
+        }
+        ui.end_row();
+
+        ui.label("PPP");
+        let mut ppp = ctx.pixels_per_point();
+        if ui
+            .add(egui::DragValue::new(&mut ppp).range(0.1..=5.0).speed(0.01))
+            .changed()
+        {
+            ctx.set_pixels_per_point(ppp);
+            ctx.stop_dragging();
+        }
+
+        ui.end_row();
+        ui.allocate_space(ui.available_size());
+    });
 }
