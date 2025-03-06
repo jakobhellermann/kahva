@@ -10,6 +10,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
 use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, Renderer};
 
+mod egui_formatter;
 mod jj;
 
 fn main() -> eframe::Result {
@@ -251,10 +252,9 @@ impl eframe::App for MyApp {
                         link_line.push_str(msg);
                     }*/
                     out.push_str(link_line.trim_end());
-                    out.push('\n');
-                }
-                if !out.is_empty() {
-                    ui.label(std::mem::take(out));
+                    if !out.is_empty() {
+                        ui.label(std::mem::take(out));
+                    }
                 }
             }
         });
