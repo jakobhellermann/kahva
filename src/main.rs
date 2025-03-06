@@ -47,7 +47,8 @@ fn load() -> Result<MyApp> {
     let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
     let prio_revset = repo.revset_expression(&prio_revset)?;
 
-    let log_template = repo.settings_commit_template("templates.log")?;
+    // let log_template = repo.settings_commit_template("templates.log")?;
+    let log_template = repo.parse_commit_template("builtin_log_oneline")?;
     let node_template = repo.parse_commit_opt_template(&get_node_template(repo.settings())?)?;
     let use_elided_nodes = repo.settings().get_bool("ui.log-synthetic-elided-nodes")?;
 
