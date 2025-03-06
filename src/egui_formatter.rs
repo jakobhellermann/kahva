@@ -12,7 +12,7 @@ type Rules = Vec<(Vec<String>, Style)>;
 #[derive(Clone, Debug)]
 pub struct ColorFormatter {
     egui_output: LayoutJob,
-    egui_format: egui::TextFormat,
+    egui_format: TextFormat,
     output: Vec<u8>,
 
     rules: Arc<Rules>,

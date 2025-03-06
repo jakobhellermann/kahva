@@ -4,25 +4,28 @@ use std::path::Path;
 
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
+use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
+use egui::{Pos2, Rect, Stroke, StrokeKind, Vec2};
 use jj_cli::formatter::{FormatRecorder, PlainTextFormatter};
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigGetError, ConfigGetResultExt};
 use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
 use jj_lib::settings::UserSettings;
-use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, Renderer};
+use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, NodeLine, Renderer};
 
 mod egui_formatter;
 mod jj;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([400.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([100.0, 100.0]),
         ..Default::default()
     };
     eframe::run_native("kahva", options, Box::new(|cc| Ok(Box::new(MyApp::new(cc)))))
 }
 
 fn setup_custom_style(ctx: &egui::Context) {
+    ctx.set_pixels_per_point(1.2);
     ctx.style_mut_of(Theme::Dark, |style| {
         style.visuals.panel_fill = Color32::from_rgb(43, 43, 46);
     });
@@ -37,7 +40,7 @@ struct CommitNode {
 //
 
 fn load() -> Result<MyApp> {
-    let repo = jj::Repo::detect(Path::new("/home/jakob/.personal/contrib/jj"))?.unwrap();
+    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
     let log_revset = repo.settings().get_string("revsets.log")?;
 
     let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
@@ -93,24 +96,6 @@ fn load() -> Result<MyApp> {
         let key = (commit_id.clone(), false);
         let commit = repo.commit(&key.0)?;
 
-        // let within_graph = with_content_format.sub_width(graph.width(&key, &graphlog_edges));
-        /*within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
-            template.format(&commit, formatter)
-        })?;
-        if !buffer.ends_with(b"\n") {
-            buffer.push(b'\n');
-        }*/
-        /*if let Some(renderer) = &diff_renderer {
-            let mut formatter = ui.new_formatter(&mut buffer);
-            renderer.show_patch(
-                ui,
-                formatter.as_mut(),
-                &commit,
-                matcher.as_ref(),
-                within_graph.width(),
-            )?;
-        }*/
-
         let mut node_out = Vec::new();
         let mut f = PlainTextFormatter::new(&mut node_out);
         node_template.format(&Some(commit.clone()), &mut f)?;
@@ -157,14 +142,19 @@ fn load() -> Result<MyApp> {
     }*/
 
     Ok(MyApp {
-        nodes,
+        content: Content { nodes },
         formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
     })
 }
 
 struct MyApp {
-    nodes: Vec<CommitNode>,
     formatter: egui_formatter::ColorFormatter,
+    content: Content,
+}
+
+#[derive(Default)]
+struct Content {
+    nodes: Vec<CommitNode>,
 }
 
 impl MyApp {
@@ -174,97 +164,145 @@ impl MyApp {
     }
 }
 
+const GRAPH_CELL_SIZE: Vec2 = Vec2::new(16.0, 16.0);
+const GRAPH_STROKE: Stroke = Stroke {
+    width: 1.,
+    color: Color32::WHITE,
+};
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let content = std::mem::take(&mut self.content);
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            for node in &self.nodes {
-                ui.horizontal(|ui| {
-                    for line in &node.row.node_line {
-                        let l = match line {
-                            renderdag::NodeLine::Blank => " ",
-                            renderdag::NodeLine::Ancestor => ".",
-                            renderdag::NodeLine::Parent => "| ",
-                            renderdag::NodeLine::Node => &node.row.glyph,
-                        };
-                        ui.label(l);
-                    }
+            let mut prev_link_line = None;
+            let mut first = true;
+            for node in &content.nodes {
+                self.draw_line_row(ui, &node, prev_link_line, first);
 
-                    ui.dnd_drag_source(egui::Id::new(&node.commit_id), "a", |ui| {
-                        node.msg.replay(&mut self.formatter).unwrap();
-                        ui.label(self.formatter.take())
-                    });
-                });
-
-                let out = &mut String::new();
                 if let Some(link_row) = &node.row.link_line {
-                    let mut link_line = String::new();
-                    let any_horizontal = link_row.iter().any(|cur| cur.intersects(LinkLine::HORIZONTAL));
-                    let mut iter = link_row
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(LinkLine::empty()))
-                        .peekable();
-                    while let Some(cur) = iter.next() {
-                        let next = match iter.peek() {
-                            Some(&v) => v,
-                            None => break,
-                        };
-                        // Draw the parent/ancestor line.
-                        if cur.intersects(LinkLine::HORIZONTAL) {
-                            if cur.intersects(LinkLine::CHILD | LinkLine::ANY_FORK_OR_MERGE) {
-                                link_line.push('+');
-                            } else {
-                                link_line.push('-');
-                            }
-                        } else if cur.intersects(LinkLine::VERTICAL) {
-                            if cur.intersects(LinkLine::ANY_FORK_OR_MERGE) && any_horizontal {
-                                link_line.push('+');
-                            } else if cur.intersects(LinkLine::VERT_PARENT) {
-                                link_line.push('|');
-                            } else {
-                                link_line.push('.');
-                            }
-                        } else if cur.intersects(LinkLine::ANY_MERGE) && any_horizontal {
-                            link_line.push('\'');
-                        } else if cur.intersects(LinkLine::ANY_FORK) && any_horizontal {
-                            link_line.push('.');
-                        } else {
-                            link_line.push(' ');
-                        }
+                    self.draw_line_link(ui, link_row);
+                }
 
-                        // Draw the connecting line.
-                        if cur.intersects(LinkLine::HORIZONTAL) {
-                            link_line.push('-');
-                        } else if cur.intersects(LinkLine::RIGHT_MERGE) {
-                            if next.intersects(LinkLine::LEFT_FORK) && !any_horizontal {
-                                link_line.push('\\');
-                            } else {
-                                link_line.push('-');
-                            }
-                        } else if cur.intersects(LinkLine::RIGHT_FORK) {
-                            if next.intersects(LinkLine::LEFT_MERGE) && !any_horizontal {
-                                link_line.push('/');
-                            } else {
-                                link_line.push('-');
-                            }
-                        } else {
-                            link_line.push(' ');
+                if let Some(term_row) = &node.row.term_line {
+                    let (response, painter) = ui.allocate_painter(
+                        GRAPH_CELL_SIZE * Vec2::new(term_row.len() as f32, 1.0),
+                        egui::Sense::empty(),
+                    );
+
+                    for (i, _) in term_row.iter().enumerate() {
+                        let rect = rect_subdiv_x(response.rect, term_row.len(), i);
+
+                        for i in 0..4 {
+                            let pos = rect.center_top() + Vec2::DOWN * i as f32 * 3.0;
+                            painter.circle_filled(pos + Vec2::X * 0.25, 0.5, GRAPH_STROKE.color);
                         }
-                    }
-                    /*if let Some(msg) = message_lines.next() {
-                        link_line.push(' ');
-                        link_line.push_str(msg);
-                    }*/
-                    out.push_str(link_line.trim_end());
-                    if !out.is_empty() {
-                        ui.label(std::mem::take(out));
                     }
                 }
+
+                prev_link_line = node.row.link_line.as_deref();
+                first = false;
             }
         });
+
+        self.content = content;
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ctx.used_size()));
     }
 }
+impl MyApp {
+    fn draw_line_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        node: &CommitNode,
+        prev_link_line: Option<&[LinkLine]>,
+        first: bool,
+    ) {
+        let node_line = &node.row.node_line;
+
+        let style = ui.style_mut();
+        style.spacing.item_spacing = Vec2::ZERO;
+        style.spacing.interact_size = Vec2::ZERO;
+
+        ui.horizontal(|ui| {
+            ui.reset_style();
+
+            let (response, painter) = ui.allocate_painter(
+                GRAPH_CELL_SIZE * Vec2::new(node_line.len() as f32, 1.0),
+                egui::Sense::empty(),
+            );
+            for (i, line) in node_line.iter().enumerate() {
+                let rect = rect_subdiv_x(response.rect, node_line.len(), i);
+                if let NodeLine::Blank = line {
+                    continue;
+                }
+
+                let is_head = match prev_link_line.and_then(|l| l.get(i)) {
+                    None if first => true,
+                    None => false,
+                    Some(link_line) => !link_line.intersects(LinkLine::ANY_FORK | LinkLine::VERT_PARENT),
+                };
+
+                if is_head {
+                    painter.line_segment([rect.center(), rect.center_bottom()], GRAPH_STROKE);
+                } else {
+                    painter.line_segment([rect.center_top(), rect.center_bottom()], GRAPH_STROKE);
+                }
+                if let NodeLine::Node = line {
+                    painter.circle_filled(rect.center() + Vec2::X * 0.25, 3.0, GRAPH_STROKE.color);
+                }
+            }
+
+            ui.dnd_drag_source(egui::Id::new(&node.commit_id), node.commit_id.clone(), |ui| {
+                node.msg.replay(&mut self.formatter).unwrap();
+                ui.label(self.formatter.take());
+            })
+        });
+    }
+
+    fn draw_line_link(&mut self, ui: &mut egui::Ui, link_row: &[LinkLine]) {
+        let (response, painter) = ui.allocate_painter(
+            GRAPH_CELL_SIZE * Vec2::new(link_row.len() as f32, 1.0),
+            egui::Sense::empty(),
+        );
+
+        let n = link_row.len();
+        for (i, cur) in link_row.iter().enumerate() {
+            let rect = rect_subdiv_x(response.rect, n, i);
+            let first_rect = rect_subdiv_x(response.rect, n, 0);
+            let next_rect = rect_subdiv_x(response.rect, n, i + 1);
+
+            if cur.intersects(LinkLine::HORIZONTAL) {
+                // painter.line_segment([rect.left_center(), rect.right_center()], stroke);
+            }
+            if cur.intersects(LinkLine::VERTICAL) {
+                painter.line_segment([rect.center_top(), rect.center_bottom()], GRAPH_STROKE);
+            }
+            if cur.intersects(LinkLine::RIGHT_FORK) {
+                painter.add(bezier(
+                    next_rect.center_top(),
+                    rect.center_bottom(),
+                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                ));
+            }
+            if cur.intersects(LinkLine::RIGHT_MERGE) {
+                painter.add(bezier(
+                    rect.center_top(),
+                    next_rect.center_bottom(),
+                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                ));
+            }
+            if cur.intersects(LinkLine::LEFT_FORK) {
+                painter.add(bezier(
+                    first_rect.center_top(),
+                    rect.center_bottom(),
+                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                ));
+            }
+            if cur.intersects(LinkLine::LEFT_MERGE) {}
+        }
+    }
+}
+
 fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {
     match e.edge_type {
         GraphEdgeType::Direct => Ancestor::Parent(e.target.clone()),
@@ -276,4 +314,25 @@ fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {
 fn get_node_template(settings: &UserSettings) -> Result<Cow<'static, str>, ConfigGetError> {
     let symbol = settings.get_string("templates.log_node").optional()?;
     Ok(symbol.map(Cow::Owned).unwrap_or(Cow::Borrowed("builtin_log_node")))
+}
+
+fn rect_subdiv_x(rect: Rect, n_x: usize, i: usize) -> Rect {
+    let w = rect.width() / n_x as f32;
+    Rect::from_min_size(
+        Pos2::new(rect.min.x + w * i as f32, rect.min.y),
+        Vec2::new(w, rect.height()),
+    )
+}
+
+fn bezier(from: Pos2, to: Pos2, delta: Vec2) -> CubicBezierShape {
+    CubicBezierShape {
+        points: [from, from + delta, to - delta, to],
+        closed: false,
+        fill: Color32::TRANSPARENT,
+        stroke: PathStroke {
+            width: GRAPH_STROKE.width,
+            color: ColorMode::Solid(GRAPH_STROKE.color),
+            kind: StrokeKind::Middle,
+        },
+    }
 }
