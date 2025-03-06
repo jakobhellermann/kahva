@@ -3,9 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
-use egui::TextFormat;
-use egui::text::LayoutJob;
-use jj_cli::formatter::{FormatRecorder, PlainTextFormatter};
+use jj_cli::formatter::FormatRecorder;
 use jj_lib::backend::CommitId;
 use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
 use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, Renderer};
@@ -33,7 +31,7 @@ struct CommitNode {
     row: GraphRow<(CommitId, bool)>,
 }
 
-fn load() -> Result<Vec<CommitNode>> {
+fn load() -> Result<MyApp> {
     let repo = jj::Repo::detect(Path::new("/home/jakob/.personal/contrib/jj"))?.unwrap();
     let log_revset = repo.settings().get_string("revsets.log")?;
 
@@ -148,18 +146,21 @@ fn load() -> Result<Vec<CommitNode>> {
         nodes.push(node);
     }*/
 
-    Ok(nodes)
+    Ok(MyApp {
+        nodes,
+        formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
+    })
 }
 
 struct MyApp {
     nodes: Vec<CommitNode>,
+    formatter: egui_formatter::ColorFormatter,
 }
 
 impl MyApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_custom_style(&cc.egui_ctx);
-
-        Self { nodes: load().unwrap() }
+        load().unwrap()
     }
 }
 
@@ -179,15 +180,8 @@ impl eframe::App for MyApp {
                     }
 
                     ui.dnd_drag_source(egui::Id::new(&node.commit_id), "a", |ui| {
-                        let mut out = Vec::new();
-                        let mut f = PlainTextFormatter::new(&mut out);
-                        node.msg.replay(&mut f).unwrap();
-                        let msg = String::from_utf8(out).unwrap();
-                        // ui.label(msg);
-
-                        let mut text = LayoutJob::default();
-                        text.append(&msg, 0.0, TextFormat::default());
-                        ui.label(text)
+                        node.msg.replay(&mut self.formatter).unwrap();
+                        ui.label(self.formatter.take())
                     });
                 });
 
