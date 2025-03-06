@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::Write;
-use std::ops::Not;
 use std::path::Path;
 
 use anyhow::Result;
@@ -39,11 +39,9 @@ struct CommitNode {
     row: GraphRow<(CommitId, bool)>,
 }
 
-//
-
 fn load() -> Result<MyApp> {
-    // let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
-    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/diffpatch"))?.unwrap();
+    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+    // let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/diffpatch"))?.unwrap();
     let log_revset = repo.settings().get_string("revsets.log")?;
 
     let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
@@ -68,8 +66,14 @@ fn load() -> Result<MyApp> {
 
     let mut graph = GraphRowRenderer::new();
 
+    let mut parents: HashMap<CommitId, Vec<CommitId>> = HashMap::default();
+
     for node in iter {
         let (commit_id, edges) = node?;
+        parents
+            .entry(commit_id.clone())
+            .or_default()
+            .extend(edges.iter().map(|edge| edge.target.clone()));
 
         let mut graphlog_edges = vec![];
         let mut missing_edge_id = None;
@@ -104,12 +108,16 @@ fn load() -> Result<MyApp> {
         let _node_symbol = String::from_utf8(node_out)?;
         let node_symbol = "o";
 
-        let edges = graphlog_edges.iter().map(convert_graph_edge_into_ancestor).collect();
-        let row = graph.next_row(key, edges, node_symbol.into(), String::new());
+        let row = graph.next_row(
+            key,
+            graphlog_edges.iter().map(convert_graph_edge_into_ancestor).collect(),
+            node_symbol.into(),
+            String::new(),
+        );
         let mut f = FormatRecorder::new();
         log_template.format(&commit, &mut f)?;
         nodes.push(CommitNode {
-            commit_id: Some(commit_id),
+            commit_id: Some(commit_id.clone()),
             msg: f,
             row,
         });
@@ -144,6 +152,12 @@ fn load() -> Result<MyApp> {
         }
     }
 
+    let heads = parents
+        .keys()
+        .filter(|&commit| !parents.values().flatten().any(|x| x == commit))
+        .cloned()
+        .collect();
+
     /*for commit in iter {
         let commit = repo.commit(&commit?.0)?;
         let mut out = Vec::new();
@@ -157,8 +171,9 @@ fn load() -> Result<MyApp> {
         nodes.push(node);
     }*/
 
+    let content = Content { nodes, parents, heads };
     Ok(MyApp {
-        content: Content { nodes },
+        content,
         formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
     })
 }
@@ -171,6 +186,9 @@ struct MyApp {
 #[derive(Default)]
 struct Content {
     nodes: Vec<CommitNode>,
+    #[expect(dead_code)]
+    parents: HashMap<CommitId, Vec<CommitId>>,
+    heads: Vec<CommitId>,
 }
 
 impl MyApp {
@@ -191,12 +209,10 @@ impl eframe::App for MyApp {
         let content = std::mem::take(&mut self.content);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let mut prev_link_line = None;
-            let mut first = true;
             for node in &content.nodes {
                 let line = &node.row;
 
-                self.draw_line_row(ui, &node, prev_link_line, first);
+                self.draw_line_row(ui, &content, node);
 
                 if let Some(link_row) = &line.link_line {
                     self.draw_line_link(ui, link_row);
@@ -217,9 +233,6 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
-
-                prev_link_line = line.link_line.as_deref();
-                first = false;
             }
         });
 
@@ -228,13 +241,7 @@ impl eframe::App for MyApp {
     }
 }
 impl MyApp {
-    fn draw_line_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        node: &CommitNode,
-        prev_link_line: Option<&[LinkLine]>,
-        first: bool,
-    ) {
+    fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &Content, node: &CommitNode) {
         let node_line = &node.row.node_line;
 
         let style = ui.style_mut();
@@ -254,11 +261,11 @@ impl MyApp {
                     continue;
                 }
 
-                let is_head = match prev_link_line.and_then(|l| l.get(i)) {
-                    None if first => true,
-                    None => false,
-                    Some(link_line) => !link_line.intersects(LinkLine::ANY_FORK | LinkLine::VERT_PARENT),
-                };
+                let is_head = i == node_line.len() - 1
+                    && node
+                        .commit_id
+                        .as_ref()
+                        .is_some_and(|commit_id| content.heads.contains(commit_id));
 
                 if is_head {
                     painter.line_segment([rect.center(), rect.center_bottom()], GRAPH_STROKE);
