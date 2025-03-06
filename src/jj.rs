@@ -135,23 +135,25 @@ impl Repo {
     pub fn write_log(&self, f: &mut dyn Formatter, commit: &Commit) -> Result<()> {
         let language = self.commit_template_language();
         let template_string = self.settings.get_string("templates.log")?;
-        let template = self.parse_template(&language, &template_string, CommitTemplateLanguage::wrap_commit)?;
-
+        let template = self.parse_commit_template(&template_string)?;
         template.format(commit, f)?;
 
         Ok(())
     }
 
+    pub fn parse_commit_template(&self, template: &str) -> Result<TemplateRenderer<'_, Commit>> {
+        let language = self.commit_template_language();
+        self.parse_template(&language, template, CommitTemplateLanguage::wrap_commit)
+    }
+    pub fn parse_commit_opt_template(&self, template: &str) -> Result<TemplateRenderer<'_, Option<Commit>>> {
+        let language = self.commit_template_language();
+        self.parse_template(&language, template, CommitTemplateLanguage::wrap_commit_opt)
+    }
+
     pub fn settings_commit_template(&self, settings_path: &'static str) -> Result<TemplateRenderer<'_, Commit>> {
         let language = self.commit_template_language();
         let annotate_commit_summary_text = self.settings.get_string(settings_path)?;
-        let template = self.parse_template(
-            &language,
-            &annotate_commit_summary_text,
-            CommitTemplateLanguage::wrap_commit,
-        )?;
-
-        Ok(template)
+        self.parse_commit_template(&annotate_commit_summary_text)
     }
 
     pub fn annotation(&self, starting_commit: &Commit, file_path: &str) -> Result<FileAnnotation> {

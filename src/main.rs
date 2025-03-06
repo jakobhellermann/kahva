@@ -1,11 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
-use jj_cli::formatter::FormatRecorder;
+use jj_cli::formatter::{FormatRecorder, PlainTextFormatter};
 use jj_lib::backend::CommitId;
+use jj_lib::config::{ConfigGetError, ConfigGetResultExt};
 use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
+use jj_lib::settings::UserSettings;
 use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, Renderer};
 
 mod egui_formatter;
@@ -31,6 +34,8 @@ struct CommitNode {
     row: GraphRow<(CommitId, bool)>,
 }
 
+//
+
 fn load() -> Result<MyApp> {
     let repo = jj::Repo::detect(Path::new("/home/jakob/.personal/contrib/jj"))?.unwrap();
     let log_revset = repo.settings().get_string("revsets.log")?;
@@ -39,6 +44,7 @@ fn load() -> Result<MyApp> {
     let prio_revset = repo.revset_expression(&prio_revset)?;
 
     let log_template = repo.settings_commit_template("templates.log")?;
+    let node_template = repo.parse_commit_opt_template(&get_node_template(repo.settings())?)?;
     let use_elided_nodes = repo.settings().get_bool("ui.log-synthetic-elided-nodes")?;
 
     let revset = repo.revset_expression(&log_revset)?.evaluate()?;
@@ -105,8 +111,12 @@ fn load() -> Result<MyApp> {
             )?;
         }*/
 
-        // let node_symbol = format_template(ui, &Some(commit), &node_template);
-        let node_symbol = "x";
+        let mut node_out = Vec::new();
+        let mut f = PlainTextFormatter::new(&mut node_out);
+        node_template.format(&Some(commit.clone()), &mut f)?;
+        let _node_symbol = String::from_utf8(node_out)?;
+        let node_symbol = "o";
+
         let edges = graphlog_edges.iter().map(convert_graph_edge_into_ancestor).collect();
         let row = graph.next_row(key, edges, node_symbol.into(), String::from_utf8_lossy(&buffer).into());
 
@@ -174,7 +184,7 @@ impl eframe::App for MyApp {
                             renderdag::NodeLine::Blank => " ",
                             renderdag::NodeLine::Ancestor => ".",
                             renderdag::NodeLine::Parent => "| ",
-                            renderdag::NodeLine::Node => "o",
+                            renderdag::NodeLine::Node => &node.row.glyph,
                         };
                         ui.label(l);
                     }
@@ -261,4 +271,9 @@ fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {
         GraphEdgeType::Indirect => Ancestor::Ancestor(e.target.clone()),
         GraphEdgeType::Missing => Ancestor::Anonymous,
     }
+}
+
+fn get_node_template(settings: &UserSettings) -> Result<Cow<'static, str>, ConfigGetError> {
+    let symbol = settings.get_string("templates.log_node").optional()?;
+    Ok(symbol.map(Cow::Owned).unwrap_or(Cow::Borrowed("builtin_log_node")))
 }
