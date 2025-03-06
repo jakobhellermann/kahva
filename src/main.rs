@@ -1,20 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
 
+use crate::backend::{CommitNode, RepoState};
+use crate::jj::Repo;
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
 use egui::{Pos2, Rect, Stroke, StrokeKind, Vec2};
-use jj_cli::formatter::{FormatRecorder, Formatter, PlainTextFormatter};
-use jj_lib::backend::CommitId;
-use jj_lib::config::{ConfigGetError, ConfigGetResultExt};
-use jj_lib::graph::{GraphEdge, GraphEdgeType, TopoGroupedGraphIterator};
-use jj_lib::settings::UserSettings;
-use renderdag::{Ancestor, GraphRow, GraphRowRenderer, LinkLine, NodeLine, Renderer};
+use renderdag::{LinkLine, NodeLine};
 
+mod backend;
 mod egui_formatter;
 mod jj;
 
@@ -23,7 +18,27 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([100.0, 100.0]),
         ..Default::default()
     };
-    eframe::run_native("kahva", options, Box::new(|cc| Ok(Box::new(MyApp::new(cc)))))
+    eframe::run_native("kahva", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+fn load() -> Result<App> {
+    let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+    let content = backend::reload(&repo)?;
+
+    Ok(App {
+        content,
+        formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
+        repo,
+        style: AppStyle::default(),
+    })
+}
+
+struct App {
+    #[allow(dead_code)]
+    repo: Repo,
+    formatter: egui_formatter::ColorFormatter,
+    content: RepoState,
+    style: AppStyle,
 }
 
 fn setup_custom_style(ctx: &egui::Context) {
@@ -33,179 +48,31 @@ fn setup_custom_style(ctx: &egui::Context) {
     });
 }
 
-struct CommitNode {
-    commit_id: Option<CommitId>,
-    msg: FormatRecorder,
-    row: GraphRow<(CommitId, bool)>,
-}
-
-fn load() -> Result<MyApp> {
-    let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
-    // let repo = jj::Repo::detect(Path::new("/home/jakob/dev/jj/diffpatch"))?.unwrap();
-    let log_revset = repo.settings().get_string("revsets.log")?;
-
-    let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
-    let prio_revset = repo.revset_expression(&prio_revset)?;
-
-    // let log_template = repo.settings_commit_template("templates.log")?;
-    let log_template = repo.parse_commit_template("builtin_log_oneline")?;
-    let node_template = repo.parse_commit_opt_template(&get_node_template(repo.settings())?)?;
-    let use_elided_nodes = repo.settings().get_bool("ui.log-synthetic-elided-nodes")?;
-
-    let revset = repo.revset_expression(&log_revset)?.evaluate()?;
-    let has_commit = revset.containing_fn();
-    let mut iter = TopoGroupedGraphIterator::new(revset.iter_graph());
-
-    for prio in prio_revset.evaluate_to_commit_ids()? {
-        let prio = prio?;
-        if has_commit(&prio)? {
-            iter.prioritize_branch(prio);
-        }
-    }
-
-    let mut nodes = Vec::new();
-
-    let mut graph = GraphRowRenderer::new();
-
-    let mut parents: HashMap<CommitId, Vec<CommitId>> = HashMap::default();
-
-    for node in iter {
-        let (commit_id, edges) = node?;
-        parents
-            .entry(commit_id.clone())
-            .or_default()
-            .extend(edges.iter().map(|edge| edge.target.clone()));
-
-        let mut graphlog_edges = vec![];
-        let mut missing_edge_id = None;
-        let mut elided_targets = vec![];
-        for edge in edges {
-            match edge.edge_type {
-                GraphEdgeType::Missing => {
-                    missing_edge_id = Some(edge.target);
-                }
-                GraphEdgeType::Direct => {
-                    graphlog_edges.push(GraphEdge::direct((edge.target, false)));
-                }
-                GraphEdgeType::Indirect => {
-                    if use_elided_nodes {
-                        elided_targets.push(edge.target.clone());
-                        graphlog_edges.push(GraphEdge::direct((edge.target, true)));
-                    } else {
-                        graphlog_edges.push(GraphEdge::indirect((edge.target, false)));
-                    }
-                }
-            }
-        }
-        if let Some(missing_edge_id) = missing_edge_id {
-            graphlog_edges.push(GraphEdge::missing((missing_edge_id, false)));
-        }
-        let key = (commit_id.clone(), false);
-        let commit = repo.commit(&key.0)?;
-
-        let mut node_out = Vec::new();
-        let mut f = PlainTextFormatter::new(&mut node_out);
-        node_template.format(&Some(commit.clone()), &mut f)?;
-        let _node_symbol = String::from_utf8(node_out)?;
-        let node_symbol = "o";
-
-        let row = graph.next_row(
-            key,
-            graphlog_edges.iter().map(convert_graph_edge_into_ancestor).collect(),
-            node_symbol.into(),
-            String::new(),
-        );
-        let mut f = FormatRecorder::new();
-        log_template.format(&commit, &mut f)?;
-        nodes.push(CommitNode {
-            commit_id: Some(commit_id.clone()),
-            msg: f,
-            row,
-        });
-
-        for elided_target in elided_targets {
-            let elided_key = (elided_target.clone(), true);
-            let real_key = (elided_key.0.clone(), false);
-            let edges = [GraphEdge::direct(real_key)];
-
-            let mut node_out = Vec::new();
-            let mut f = PlainTextFormatter::new(&mut node_out);
-            node_template.format(&Some(commit.clone()), &mut f)?;
-            let _node_symbol = String::from_utf8(node_out)?;
-            let node_symbol = "o";
-
-            let edges = edges.iter().map(convert_graph_edge_into_ancestor).collect();
-            let row = graph.next_row(
-                elided_key,
-                edges,
-                node_symbol.to_owned(),
-                "(elided revisions)".to_owned(),
-            );
-            let mut f = FormatRecorder::new();
-            f.push_label("elided")?;
-            f.write_all(b"(elided revisions)")?;
-            f.pop_label()?;
-            nodes.push(CommitNode {
-                commit_id: None,
-                msg: f,
-                row,
-            });
-        }
-    }
-
-    let heads = parents
-        .keys()
-        .filter(|&commit| !parents.values().flatten().any(|x| x == commit))
-        .cloned()
-        .collect();
-
-    /*for commit in iter {
-        let commit = repo.commit(&commit?.0)?;
-        let mut out = Vec::new();
-        let mut f = PlainTextFormatter::new(&mut out);
-        log_template.format(&commit, &mut f)?;
-        let node = CommitNode {
-            commit_id: commit.id().to_owned(),
-            msg: String::from_utf8(out)?,
-        };
-
-        nodes.push(node);
-    }*/
-
-    let content = Content { nodes, parents, heads };
-    Ok(MyApp {
-        content,
-        formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
-    })
-}
-
-struct MyApp {
-    formatter: egui_formatter::ColorFormatter,
-    content: Content,
-}
-
-#[derive(Default)]
-struct Content {
-    nodes: Vec<CommitNode>,
-    #[expect(dead_code)]
-    parents: HashMap<CommitId, Vec<CommitId>>,
-    heads: Vec<CommitId>,
-}
-
-impl MyApp {
+impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_custom_style(&cc.egui_ctx);
         load().unwrap()
     }
 }
 
-const GRAPH_CELL_SIZE: Vec2 = Vec2::new(16.0, 20.0);
-const GRAPH_STROKE: Stroke = Stroke {
-    width: 1.,
-    color: Color32::WHITE,
-};
+struct AppStyle {
+    graph_cell_size: Vec2,
+    graph_stroke: Stroke,
+}
 
-impl eframe::App for MyApp {
+impl Default for AppStyle {
+    fn default() -> Self {
+        AppStyle {
+            graph_cell_size: Vec2::new(16.0, 20.0),
+            graph_stroke: Stroke {
+                width: 1.,
+                color: Color32::WHITE,
+            },
+        }
+    }
+}
+
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let content = std::mem::take(&mut self.content);
 
@@ -221,7 +88,7 @@ impl eframe::App for MyApp {
 
                 if let Some(term_row) = &line.term_line {
                     let (response, painter) = ui.allocate_painter(
-                        GRAPH_CELL_SIZE * Vec2::new(term_row.len() as f32, 1.0),
+                        self.style.graph_cell_size * Vec2::new(term_row.len() as f32, 1.0),
                         egui::Sense::empty(),
                     );
 
@@ -230,7 +97,7 @@ impl eframe::App for MyApp {
 
                         for i in 0..4 {
                             let pos = rect.center_top() + Vec2::DOWN * i as f32 * 3.0;
-                            painter.circle_filled(pos + Vec2::X * 0.25, 0.5, GRAPH_STROKE.color);
+                            painter.circle_filled(pos + Vec2::X * 0.25, 0.5, self.style.graph_stroke.color);
                         }
                     }
                 }
@@ -241,8 +108,8 @@ impl eframe::App for MyApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ctx.used_size()));
     }
 }
-impl MyApp {
-    fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &Content, node: &CommitNode) {
+impl App {
+    fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &RepoState, node: &CommitNode) {
         let node_line = &node.row.node_line;
 
         let style = ui.style_mut();
@@ -253,7 +120,7 @@ impl MyApp {
             ui.reset_style();
 
             let (response, painter) = ui.allocate_painter(
-                GRAPH_CELL_SIZE * Vec2::new(node_line.len() as f32, 1.0),
+                self.style.graph_cell_size * Vec2::new(node_line.len() as f32, 1.0),
                 egui::Sense::empty(),
             );
             for (i, line) in node_line.iter().enumerate() {
@@ -269,12 +136,12 @@ impl MyApp {
                         .is_some_and(|commit_id| content.heads.contains(commit_id));
 
                 if is_head {
-                    painter.line_segment([rect.center(), rect.center_bottom()], GRAPH_STROKE);
+                    painter.line_segment([rect.center(), rect.center_bottom()], self.style.graph_stroke);
                 } else {
-                    painter.line_segment([rect.center_top(), rect.center_bottom()], GRAPH_STROKE);
+                    painter.line_segment([rect.center_top(), rect.center_bottom()], self.style.graph_stroke);
                 }
                 if let NodeLine::Node = line {
-                    painter.circle_filled(rect.center() + Vec2::X * 0.25, 3.0, GRAPH_STROKE.color);
+                    painter.circle_filled(rect.center() + Vec2::X * 0.25, 3.0, self.style.graph_stroke.color);
                 }
             }
 
@@ -293,7 +160,7 @@ impl MyApp {
 
     fn draw_line_link(&mut self, ui: &mut egui::Ui, link_row: &[LinkLine]) {
         let (response, painter) = ui.allocate_painter(
-            GRAPH_CELL_SIZE * Vec2::new(link_row.len() as f32, 1.0),
+            self.style.graph_cell_size * Vec2::new(link_row.len() as f32, 1.0),
             egui::Sense::empty(),
         );
 
@@ -307,45 +174,45 @@ impl MyApp {
                 // painter.line_segment([rect.left_center(), rect.right_center()], stroke);
             }
             if cur.intersects(LinkLine::VERTICAL) {
-                painter.line_segment([rect.center_top(), rect.center_bottom()], GRAPH_STROKE);
+                painter.line_segment([rect.center_top(), rect.center_bottom()], self.style.graph_stroke);
             }
             if cur.intersects(LinkLine::RIGHT_FORK) {
-                painter.add(bezier(
+                painter.add(self.bezier(
                     next_rect.center_top(),
                     rect.center_bottom(),
-                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                    Vec2::Y * self.style.graph_cell_size.y * 0.8,
                 ));
             }
             if cur.intersects(LinkLine::RIGHT_MERGE) {
-                painter.add(bezier(
+                painter.add(self.bezier(
                     rect.center_top(),
                     next_rect.center_bottom(),
-                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                    Vec2::Y * self.style.graph_cell_size.y * 0.8,
                 ));
             }
             if cur.intersects(LinkLine::LEFT_FORK) {
-                painter.add(bezier(
+                painter.add(self.bezier(
                     first_rect.center_top(),
                     rect.center_bottom(),
-                    Vec2::Y * GRAPH_CELL_SIZE.y * 0.8,
+                    Vec2::Y * self.style.graph_cell_size.y * 0.8,
                 ));
             }
             if cur.intersects(LinkLine::LEFT_MERGE) {}
         }
     }
-}
 
-fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {
-    match e.edge_type {
-        GraphEdgeType::Direct => Ancestor::Parent(e.target.clone()),
-        GraphEdgeType::Indirect => Ancestor::Ancestor(e.target.clone()),
-        GraphEdgeType::Missing => Ancestor::Anonymous,
+    fn bezier(&self, from: Pos2, to: Pos2, delta: Vec2) -> CubicBezierShape {
+        CubicBezierShape {
+            points: [from, from + delta, to - delta, to],
+            closed: false,
+            fill: Color32::TRANSPARENT,
+            stroke: PathStroke {
+                width: self.style.graph_stroke.width,
+                color: ColorMode::Solid(self.style.graph_stroke.color),
+                kind: StrokeKind::Middle,
+            },
+        }
     }
-}
-
-fn get_node_template(settings: &UserSettings) -> Result<Cow<'static, str>, ConfigGetError> {
-    let symbol = settings.get_string("templates.log_node").optional()?;
-    Ok(symbol.map(Cow::Owned).unwrap_or(Cow::Borrowed("builtin_log_node")))
 }
 
 fn rect_subdiv_x(rect: Rect, n_x: usize, i: usize) -> Rect {
@@ -354,17 +221,4 @@ fn rect_subdiv_x(rect: Rect, n_x: usize, i: usize) -> Rect {
         Pos2::new(rect.min.x + w * i as f32, rect.min.y),
         Vec2::new(w, rect.height()),
     )
-}
-
-fn bezier(from: Pos2, to: Pos2, delta: Vec2) -> CubicBezierShape {
-    CubicBezierShape {
-        points: [from, from + delta, to - delta, to],
-        closed: false,
-        fill: Color32::TRANSPARENT,
-        stroke: PathStroke {
-            width: GRAPH_STROKE.width,
-            color: ColorMode::Solid(GRAPH_STROKE.color),
-            kind: StrokeKind::Middle,
-        },
-    }
 }
