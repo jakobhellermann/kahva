@@ -34,6 +34,7 @@ use anyhow::{Result, anyhow, ensure};
 use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
+use jj_lib::op_store::RefTarget;
 use jj_lib::working_copy::{CheckoutOptions, CheckoutStats};
 
 pub struct Repo {
@@ -75,7 +76,10 @@ impl Repo {
         let Some(workspace_dir) = Repo::find_root(cwd) else {
             return Ok(None);
         };
+        Repo::load_at(workspace_dir).map(Some)
+    }
 
+    pub fn load_at(workspace_dir: &Path) -> Result<Repo> {
         let config_env = ConfigEnv::from_environment();
         let mut config = config_from_environment(default_config_layers());
         // TODO(config): workspace loader
@@ -125,7 +129,12 @@ impl Repo {
             None => this.id_prefix_context,
         };
 
-        Ok(Some(this))
+        Ok(this)
+    }
+
+    pub fn reload(&mut self) -> Result<()> {
+        *self = Repo::load_at(self.workspace_dir())?;
+        Ok(())
     }
 
     pub fn settings(&self) -> &UserSettings {
@@ -226,6 +235,23 @@ impl Repo {
         let commit = self.repo.store().get_commit(commit_id)?;
 
         Ok(commit)
+    }
+
+    pub fn move_bookmark(&mut self, bookmark: &str, to: &CommitId) -> Result<()> {
+        let mut tx = self.repo.start_transaction();
+        tx.set_tag("bookmark".to_owned(), bookmark.to_owned());
+
+        let bookmark_target = tx.repo_mut().get_local_bookmark(&bookmark);
+        ensure!(!bookmark_target.is_absent(), "Bookmark {bookmark} does not exist");
+
+        tx.repo_mut()
+            .set_local_bookmark_target(bookmark, RefTarget::normal(to.clone()));
+
+        jj_lib::git::export_refs(tx.repo_mut())?;
+
+        self.repo = tx.commit("kahva: move bookmark")?;
+
+        Ok(())
     }
 
     pub fn describe(&mut self, commit: &Commit, description: &str) -> Result<()> {

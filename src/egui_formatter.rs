@@ -276,7 +276,9 @@ impl Write for ColorFormatter {
     }
 }
 
-const NOTABLE_LABELS: &[&str] = &["bookmarks", "description"];
+// const NOTABLE_LABELS: &[&str] = &["bookmarks", "description"];
+// const NOTABLE_LABELS: &[&str] = &["bookmarks"];
+const NOTABLE_LABELS: &[&[&str]] = &[&["bookmarks", "name"], &["description"]];
 
 impl Formatter for ColorFormatter {
     fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
@@ -285,20 +287,28 @@ impl Formatter for ColorFormatter {
     }
 
     fn push_label(&mut self, label: &str) -> io::Result<()> {
-        if NOTABLE_LABELS.contains(&label) {
-            self.egui_output.push((LayoutJob::default(), Some(label.to_owned())));
-        }
         self.labels.push(label.to_owned());
+
+        if let Some(head) = NOTABLE_LABELS
+            .iter()
+            .find(|&head| self.labels.iter().rev().zip(head.iter().rev()).all(|(a, b)| a == b))
+        {
+            self.flush_to_egui();
+            self.egui_output.push((LayoutJob::default(), Some(head[0].to_owned())));
+        }
         Ok(())
     }
 
     fn pop_label(&mut self) -> io::Result<()> {
-        if let Some(last_label) = self.labels.pop() {
-            if NOTABLE_LABELS.contains(&last_label.as_str()) {
-                self.flush_to_egui();
-                self.egui_output.push((LayoutJob::default(), None));
-            }
+        if NOTABLE_LABELS
+            .iter()
+            .any(|&head| self.labels.iter().rev().zip(head.iter().rev()).all(|(a, b)| a == b))
+        {
+            self.flush_to_egui();
+            self.egui_output.push((LayoutJob::default(), None));
         }
+
+        self.labels.pop();
         if self.labels.is_empty() {
             self.write_new_style()?;
         }

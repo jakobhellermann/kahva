@@ -1,16 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::ops::RangeInclusive;
-use std::path::Path;
-
 use crate::backend::{CommitNode, RepoView};
 use crate::jj::Repo;
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
-use egui::{FontId, Margin, Pos2, Rect, Stroke, StrokeKind, TextEdit, TextStyle, Vec2, Widget};
+use egui::{DragAndDrop, FontId, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, TextEdit, TextStyle, Vec2, Widget};
 use jj_lib::backend::CommitId;
 use renderdag::{LinkLine, NodeLine};
+use std::fmt::Display;
+use std::ops::RangeInclusive;
+use std::path::Path;
 
 mod backend;
 mod egui_formatter;
@@ -21,7 +21,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200., 400.]),
         ..Default::default()
     };
-    let app = App::load().unwrap();
+    let app = App::load().expect("initial load");
     eframe::run_native(
         "kahva",
         options,
@@ -36,8 +36,8 @@ fn setup_custom_style(ctx: &egui::Context) {
     //ctx.set_pixels_per_point(1.2);
     ctx.set_pixels_per_point(1.2);
     ctx.style_mut_of(Theme::Dark, |style| {
-        style.visuals.panel_fill = Color32::from_rgb(11, 11, 22);
-        // style.text_styles.get_mut(&TextStyle::Body).unwrap().size = 20.0;
+        // style.visuals.panel_fill = Color32::from_rgb(11, 11, 22);
+        style.visuals.panel_fill = Color32::from_rgb(28, 30, 34);
         *style.text_styles.get_mut(&TextStyle::Body).unwrap() = FontId::proportional(14.0);
         style.interaction.selectable_labels = false;
         // style.debug.show_widget_hits = true;
@@ -47,7 +47,7 @@ fn setup_custom_style(ctx: &egui::Context) {
 struct App(UiState, RepoView);
 impl App {
     fn load() -> Result<App> {
-        let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+        let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.expect("no repo at path");
         let content = backend::reload(&repo)?;
 
         Ok(App(
@@ -55,6 +55,7 @@ impl App {
                 formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
                 repo,
                 style: AppStyle::default(),
+                error: None,
                 initial_sized: false,
                 dirty: false,
             },
@@ -67,6 +68,8 @@ struct UiState {
     repo: Repo,
     formatter: egui_formatter::ColorFormatter,
     style: AppStyle,
+
+    error: Option<String>,
 
     initial_sized: bool,
     dirty: bool,
@@ -81,6 +84,11 @@ impl UiState {
     }
     fn reload(&mut self) {
         self.dirty = true;
+        self.clear_error();
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
     }
 }
 
@@ -104,7 +112,10 @@ impl Default for AppStyle {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.0.dirty {
-            self.1 = backend::reload(&self.0.repo).unwrap();
+            let res = self.0.repo.reload().and(backend::reload(&self.0.repo));
+            if let Some(repo_view) = self.0.catch(res) {
+                self.1 = repo_view;
+            }
             self.0.dirty = false;
         }
         self.0.update(ctx, &self.1)
@@ -119,10 +130,15 @@ impl UiState {
             .default_open(false)
             .show(ctx, |ui| theme_window(ctx, ui, &mut self.style));
 
-        /*egui::SidePanel::right("side_panel")
-        .resizable(false)
-        .frame(egui::Frame::new())
-        .show(ctx, |ui| {});*/
+        if let Some(error) = &self.error {
+            egui::Area::new(egui::Id::new("error"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-10., -10.])
+                .default_size(Vec2::splat(400.0))
+                .show(ctx, |ui| {
+                    ui.label(RichText::new(error).color(Color32::from_rgb(255, 0, 51)));
+                });
+        }
+
         egui::Area::new(egui::Id::new("controls"))
             .anchor(egui::Align2::RIGHT_TOP, [-10., 10.])
             .show(ctx, |ui| {
@@ -166,6 +182,12 @@ impl UiState {
         }
     }
 }
+
+#[derive(Debug)]
+enum DropPayload {
+    Bookmark(String),
+}
+
 impl UiState {
     fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &RepoView, node: &CommitNode) {
         let id = node
@@ -220,10 +242,10 @@ impl UiState {
                     for (i, (job, label)) in sections.into_iter().enumerate() {
                         match label.as_deref() {
                             Some("bookmarks") if node.commit_id.is_some() => {
-                                let commit_id = node.commit_id.clone().unwrap();
-                                ui.dnd_drag_source(egui::Id::new(&commit_id).with(i), commit_id, |ui| ui.label(job));
+                                let bookmark = job.text.trim().trim_end_matches("*").to_owned();
+                                ui.dnd_drag_source(id.with(i), DropPayload::Bookmark(bookmark), |ui| ui.label(job));
                             }
-                            Some("description") if true => {
+                            Some("description") => {
                                 let desc_id = id.with("description");
                                 let is_empty = job.text == "(no description set)";
 
@@ -246,7 +268,8 @@ impl UiState {
                                 if response.lost_focus() {
                                     if job.text.trim() != description_text {
                                         let commit = node.commit_id.as_ref().unwrap();
-                                        self.describe(commit, &description_text).unwrap();
+                                        let res = self.describe(commit, &description_text);
+                                        self.catch(res);
                                         ui.data_mut(|data| data.remove_temp::<String>(desc_id));
                                     }
                                 } else if response.changed() {
@@ -261,9 +284,21 @@ impl UiState {
                 });
             };
 
-            if let Some(_commit_id) = &node.commit_id {
+            if let Some(commit_id) = &node.commit_id {
+                if DragAndDrop::has_payload_of_type::<DropPayload>(ui.ctx()) {
+                    let frame = egui::Frame::dark_canvas(ui.style())
+                        .outer_margin(Margin::ZERO)
+                        .inner_margin(Margin::ZERO)
+                        .corner_radius(0)
+                        .stroke(Stroke::NONE);
+                    let result = ui.dnd_drop_zone::<DropPayload, _>(frame, msg);
+                    if let Some(result) = result.1 {
+                        self.handle_drop(commit_id, &result);
+                    }
+                } else {
+                    msg(ui);
+                }
                 // ui.dnd_drag_source(egui::Id::new(commit_id), node.commit_id.clone(), msg);
-                msg(ui);
             } else {
                 msg(ui);
             }
@@ -323,6 +358,24 @@ impl UiState {
                 color: ColorMode::Solid(self.style.graph_stroke.color),
                 kind: StrokeKind::Middle,
             },
+        }
+    }
+
+    fn catch<T, E: Display>(&mut self, res: Result<T, E>) -> Option<T> {
+        if let Err(error) = &res {
+            eprintln!("{error}");
+            self.error = Some(error.to_string());
+        }
+        res.ok()
+    }
+
+    fn handle_drop(&mut self, commit: &CommitId, payload: &DropPayload) {
+        match payload {
+            DropPayload::Bookmark(bookmark) => {
+                let res = self.repo.move_bookmark(bookmark, commit);
+                self.catch(res);
+                self.reload();
+            }
         }
     }
 }
