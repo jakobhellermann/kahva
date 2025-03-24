@@ -27,7 +27,11 @@ pub struct RepoView {
 pub fn reload(repo: &Repo) -> Result<RepoView> {
     let log_revset = repo.settings().get_string("revsets.log")?;
 
-    let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
+    let prio_revset = repo
+        .settings()
+        .get_string("revsets.log-graph-prioritize")
+        .optional()?
+        .unwrap_or_else(|| "present(@)".to_owned());
     let prio_revset = repo.revset_expression(&prio_revset)?;
 
     // let log_template = repo.settings_commit_template("templates.log")?;
