@@ -3,12 +3,13 @@
 use std::ops::RangeInclusive;
 use std::path::Path;
 
-use crate::backend::{CommitNode, RepoState};
+use crate::backend::{CommitNode, RepoView};
 use crate::jj::Repo;
 use anyhow::Result;
 use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
-use egui::{Pos2, Rect, Stroke, StrokeKind, Vec2};
+use egui::{FontId, Margin, Pos2, Rect, Stroke, StrokeKind, TextEdit, TextStyle, Vec2, Widget};
+use jj_lib::backend::CommitId;
 use renderdag::{LinkLine, NodeLine};
 
 mod backend;
@@ -20,43 +21,66 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200., 400.]),
         ..Default::default()
     };
-    eframe::run_native("kahva", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
-}
-
-fn load() -> Result<App> {
-    let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
-    let content = backend::reload(&repo)?;
-
-    Ok(App {
-        content,
-        formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
-        repo,
-        style: AppStyle::default(),
-        initial_sized: false,
-    })
-}
-
-struct App {
-    #[allow(dead_code)]
-    repo: Repo,
-    formatter: egui_formatter::ColorFormatter,
-    content: RepoState,
-    style: AppStyle,
-
-    initial_sized: bool,
+    let app = App::load().unwrap();
+    eframe::run_native(
+        "kahva",
+        options,
+        Box::new(|cc| {
+            setup_custom_style(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
 }
 
 fn setup_custom_style(ctx: &egui::Context) {
+    //ctx.set_pixels_per_point(1.2);
     ctx.set_pixels_per_point(1.2);
     ctx.style_mut_of(Theme::Dark, |style| {
         style.visuals.panel_fill = Color32::from_rgb(11, 11, 22);
+        // style.text_styles.get_mut(&TextStyle::Body).unwrap().size = 20.0;
+        *style.text_styles.get_mut(&TextStyle::Body).unwrap() = FontId::proportional(14.0);
+        style.interaction.selectable_labels = false;
+        // style.debug.show_widget_hits = true;
     });
 }
 
+struct App(UiState, RepoView);
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_custom_style(&cc.egui_ctx);
-        load().unwrap()
+    fn load() -> Result<App> {
+        let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.unwrap();
+        let content = backend::reload(&repo)?;
+
+        Ok(App(
+            UiState {
+                formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
+                repo,
+                style: AppStyle::default(),
+                initial_sized: false,
+                dirty: false,
+            },
+            content,
+        ))
+    }
+}
+
+struct UiState {
+    repo: Repo,
+    formatter: egui_formatter::ColorFormatter,
+    style: AppStyle,
+
+    initial_sized: bool,
+    dirty: bool,
+}
+
+impl UiState {
+    fn describe(&mut self, commit_id: &CommitId, description: &str) -> Result<()> {
+        let commit = self.repo.commit(commit_id)?;
+        self.repo.describe(&commit, description)?;
+        self.reload();
+        Ok(())
+    }
+    fn reload(&mut self) {
+        self.dirty = true;
     }
 }
 
@@ -79,13 +103,33 @@ impl Default for AppStyle {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let content = std::mem::take(&mut self.content);
+        if self.0.dirty {
+            self.1 = backend::reload(&self.0.repo).unwrap();
+            self.0.dirty = false;
+        }
+        self.0.update(ctx, &self.1)
+    }
+}
 
+impl UiState {
+    fn update(&mut self, ctx: &egui::Context, content: &RepoView) {
         #[cfg(any())]
         egui::Window::new("Theme")
             .fixed_pos(ctx.used_size().to_pos2())
             .default_open(false)
             .show(ctx, |ui| theme_window(ctx, ui, &mut self.style));
+
+        /*egui::SidePanel::right("side_panel")
+        .resizable(false)
+        .frame(egui::Frame::new())
+        .show(ctx, |ui| {});*/
+        egui::Area::new(egui::Id::new("controls"))
+            .anchor(egui::Align2::RIGHT_TOP, [-10., 10.])
+            .show(ctx, |ui| {
+                if ui.button("⟳").clicked() {
+                    self.reload();
+                }
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             for node in &content.nodes {
@@ -115,8 +159,6 @@ impl eframe::App for App {
             }
         });
 
-        self.content = content;
-
         let used_size = ctx.used_size();
         if !self.initial_sized && used_size.x > 0. && used_size.x < 5000. {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(used_size));
@@ -124,8 +166,14 @@ impl eframe::App for App {
         }
     }
 }
-impl App {
-    fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &RepoState, node: &CommitNode) {
+impl UiState {
+    fn draw_line_row(&mut self, ui: &mut egui::Ui, content: &RepoView, node: &CommitNode) {
+        let id = node
+            .commit_id
+            .as_ref()
+            .map(egui::Id::new)
+            .unwrap_or_else(|| egui::Id::new("todo"));
+
         let node_line = &node.row.node_line;
 
         let style = ui.style_mut();
@@ -163,11 +211,59 @@ impl App {
 
             let mut msg = |ui: &mut egui::Ui| {
                 node.msg.replay(&mut self.formatter).unwrap();
-                ui.label(self.formatter.take());
+
+                let layout = egui::Layout::left_to_right(egui::Align::Center);
+                ui.with_layout(layout, |ui| {
+                    ui.style_mut().spacing.item_spacing = Vec2::ZERO;
+                    let sections = self.formatter.take();
+
+                    for (i, (job, label)) in sections.into_iter().enumerate() {
+                        match label.as_deref() {
+                            Some("bookmarks") if node.commit_id.is_some() => {
+                                let commit_id = node.commit_id.clone().unwrap();
+                                ui.dnd_drag_source(egui::Id::new(&commit_id).with(i), commit_id, |ui| ui.label(job));
+                            }
+                            Some("description") if true => {
+                                let desc_id = id.with("description");
+                                let is_empty = job.text == "(no description set)";
+
+                                let mut description_text = ui.data_mut(|data| {
+                                    data.get_temp_mut_or_insert_with(desc_id, || match is_empty {
+                                        true => String::new(),
+                                        false => job.text.trim().to_owned(),
+                                    })
+                                    .clone()
+                                });
+
+                                let response = TextEdit::singleline(&mut description_text)
+                                    .hint_text("(no description set)")
+                                    .frame(false)
+                                    .min_size(Vec2::ZERO)
+                                    .margin(Margin::symmetric(4, 0))
+                                    .clip_text(false)
+                                    .ui(ui);
+
+                                if response.lost_focus() {
+                                    if job.text.trim() != description_text {
+                                        let commit = node.commit_id.as_ref().unwrap();
+                                        self.describe(commit, &description_text).unwrap();
+                                        ui.data_mut(|data| data.remove_temp::<String>(desc_id));
+                                    }
+                                } else if response.changed() {
+                                    ui.data_mut(|data| data.insert_temp(desc_id, description_text));
+                                }
+                            }
+                            _ => {
+                                ui.label(job);
+                            }
+                        }
+                    }
+                });
             };
 
-            if let Some(commit_id) = &node.commit_id {
-                ui.dnd_drag_source(egui::Id::new(commit_id), node.commit_id.clone(), msg);
+            if let Some(_commit_id) = &node.commit_id {
+                // ui.dnd_drag_source(egui::Id::new(commit_id), node.commit_id.clone(), msg);
+                msg(ui);
             } else {
                 msg(ui);
             }

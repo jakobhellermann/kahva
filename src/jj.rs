@@ -31,7 +31,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, ensure};
+use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId;
+use jj_lib::working_copy::{CheckoutOptions, CheckoutStats};
 
 pub struct Repo {
     workspace: Workspace,
@@ -225,6 +228,70 @@ impl Repo {
         Ok(commit)
     }
 
+    pub fn describe(&mut self, commit: &Commit, description: &str) -> Result<()> {
+        let mut tx = self.repo.start_transaction();
+        tx.set_tag("commit".to_owned(), commit.change_id().to_string());
+
+        tx.repo_mut()
+            .rewrite_commit(commit)
+            .set_description(description)
+            .write()?;
+        let num_changed = tx.repo_mut().rebase_descendants()?;
+
+        /*for (workspace_id, wc_commit_id) in &tx.repo().view().wc_commit_ids().clone() {
+            if self
+                .env
+                .find_immutable_commit(tx.repo(), [wc_commit_id])?
+                .is_some()
+            {
+                let wc_commit = tx.repo().store().get_commit(wc_commit_id)?;
+                tx.repo_mut().check_out(workspace_id.clone(), &wc_commit)?;
+                writeln!(
+                    ui.warning_default(),
+                    "The working-copy commit in workspace '{}' became immutable, so a new commit \
+                     has been created on top of it.",
+                    workspace_id.as_str()
+                )?;
+            }
+        }*/
+
+        let old_repo = tx.base_repo();
+        let maybe_old_wc_commit = old_repo
+            .view()
+            .get_wc_commit_id(self.workspace.workspace_id())
+            .map(|commit_id| tx.base_repo().store().get_commit(commit_id))
+            .transpose()?;
+        let maybe_new_wc_commit = tx
+            .repo()
+            .view()
+            .get_wc_commit_id(self.workspace.workspace_id())
+            .map(|commit_id| tx.repo().store().get_commit(commit_id))
+            .transpose()?;
+
+        // if self.may_update_working_copy {
+        if let Some(new_commit) = &maybe_new_wc_commit {
+            // self.update_working_copy(ui, maybe_old_wc_commit.as_ref(), new_commit)?;
+            let checkout_options = CheckoutOptions {
+                conflict_marker_style: self.settings.get("ui.conflict-marker-style")?,
+            };
+            update_working_copy(
+                &self.repo,
+                &mut self.workspace,
+                maybe_old_wc_commit.as_ref(),
+                new_commit,
+                &checkout_options,
+            );
+        } else {
+            // It seems the workspace was deleted, so we shouldn't try to
+            // update it.
+        }
+        // }
+
+        self.repo = tx.commit("kahva: describe")?;
+
+        Ok(())
+    }
+
     pub fn diff(&self, commit: &Commit) -> Result<DiffState<'_>> {
         let from_tree = commit.parent_tree(self.repo.as_ref())?;
         let to_tree = commit.tree()?;
@@ -273,7 +340,7 @@ impl DiffState<'_> {
             .from_tree
             .diff_stream_with_copies(&self.to_tree, matcher, &self.copy_records);
 
-        jj_cli::diff_util::show_git_diff(
+        diff_util::show_git_diff(
             f,
             self.repo.repo.store(),
             diff,
@@ -435,4 +502,20 @@ pub(super) fn evaluate_revset_to_single_commit(
         (None, _) => Err(anyhow!(r#"Revset "{revision_str}" didn't resolve to any revisions"#)),
         (Some(_), Some(_)) => Err(anyhow!("{revision_str} resolved to multiple commits")),
     }
+}
+
+fn update_working_copy(
+    repo: &Arc<ReadonlyRepo>,
+    workspace: &mut Workspace,
+    old_commit: Option<&Commit>,
+    new_commit: &Commit,
+    options: &CheckoutOptions,
+) -> Result<CheckoutStats> {
+    let old_tree_id = old_commit.map(|commit| commit.tree_id().clone());
+    // TODO: CheckoutError::ConcurrentCheckout should probably just result in a
+    // warning for most commands (but be an error for the checkout command)
+    let stats = workspace
+        .check_out(repo.op_id().clone(), old_tree_id.as_ref(), new_commit, options)
+        .map_err(|err| anyhow!("Failed to check out commit {}", new_commit.id().hex()))?;
+    Ok(stats)
 }

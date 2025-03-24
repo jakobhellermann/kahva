@@ -17,14 +17,14 @@ pub struct CommitNode {
 }
 
 #[derive(Default)]
-pub struct RepoState {
+pub struct RepoView {
     pub nodes: Vec<CommitNode>,
     #[expect(dead_code)]
     pub parents: HashMap<CommitId, Vec<CommitId>>,
     pub heads: Vec<CommitId>,
 }
 
-pub fn reload(repo: &Repo) -> Result<RepoState> {
+pub fn reload(repo: &Repo) -> Result<RepoView> {
     let log_revset = repo.settings().get_string("revsets.log")?;
 
     let prio_revset = repo.settings().get_string("revsets.log-graph-prioritize")?;
@@ -142,7 +142,7 @@ pub fn reload(repo: &Repo) -> Result<RepoState> {
         .cloned()
         .collect();
 
-    Ok(RepoState { nodes, parents, heads })
+    Ok(RepoView { nodes, parents, heads })
 }
 
 fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {

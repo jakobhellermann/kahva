@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-use std::io::{self, Error, Write};
-use std::sync::Arc;
-
 use egui::TextFormat;
 use egui::text::LayoutJob;
 use jj_cli::formatter::{Color, Formatter, Style};
 use jj_lib::config::{ConfigGetError, StackedConfig};
+use std::collections::HashMap;
+use std::io::{self, Error, Write};
+use std::sync::Arc;
 
 type Rules = Vec<(Vec<String>, Style)>;
 
@@ -16,9 +15,9 @@ fn default_format() -> TextFormat {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ColorFormatter {
-    egui_output: LayoutJob,
+    egui_output: Vec<(LayoutJob, Option<String>)>,
     egui_format: TextFormat,
     output: Vec<u8>,
 
@@ -37,7 +36,7 @@ pub struct ColorFormatter {
 impl ColorFormatter {
     pub fn new(rules: Arc<Rules>, debug: bool) -> ColorFormatter {
         ColorFormatter {
-            egui_output: LayoutJob::default(),
+            egui_output: vec![(LayoutJob::default(), None)],
             egui_format: default_format(),
             output: Vec::new(),
             rules,
@@ -53,16 +52,18 @@ impl ColorFormatter {
         Ok(Self::new(Arc::new(rules), debug))
     }
 
-    pub fn take(&mut self) -> LayoutJob {
+    pub fn take(&mut self) -> Vec<(LayoutJob, Option<String>)> {
         self.flush_to_egui();
         self.egui_format = default_format();
         self.current_style = Style::default();
 
-        let mut output = std::mem::take(&mut self.egui_output);
+        let mut output = std::mem::replace(&mut self.egui_output, vec![(LayoutJob::default(), None)]);
 
-        if let Some(last) = output.sections.last_mut() {
-            if output.text.ends_with('\n') && last.byte_range.len() == 1 {
-                output.sections.pop();
+        if let Some((last, _)) = output.last_mut() {
+            if let Some(last_section) = last.sections.last_mut() {
+                if last.text.ends_with('\n') && last_section.byte_range.len() == 1 {
+                    last.sections.pop();
+                }
             }
         }
 
@@ -187,7 +188,14 @@ impl ColorFormatter {
             return;
         }
         let out = String::from_utf8_lossy(&self.output);
-        self.egui_output.append(&out, 0.0, self.egui_format.clone());
+
+        // self.egui_output.push(LayoutJob::default());
+
+        self.egui_output
+            .last_mut()
+            .unwrap()
+            .0
+            .append(&out, 0.0, self.egui_format.clone());
         self.output.clear();
     }
 }
@@ -268,6 +276,8 @@ impl Write for ColorFormatter {
     }
 }
 
+const NOTABLE_LABELS: &[&str] = &["bookmarks", "description"];
+
 impl Formatter for ColorFormatter {
     fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
         self.write_new_style()?;
@@ -275,12 +285,20 @@ impl Formatter for ColorFormatter {
     }
 
     fn push_label(&mut self, label: &str) -> io::Result<()> {
+        if NOTABLE_LABELS.contains(&label) {
+            self.egui_output.push((LayoutJob::default(), Some(label.to_owned())));
+        }
         self.labels.push(label.to_owned());
         Ok(())
     }
 
     fn pop_label(&mut self) -> io::Result<()> {
-        self.labels.pop();
+        if let Some(last_label) = self.labels.pop() {
+            if NOTABLE_LABELS.contains(&last_label.as_str()) {
+                self.flush_to_egui();
+                self.egui_output.push((LayoutJob::default(), None));
+            }
+        }
         if self.labels.is_empty() {
             self.write_new_style()?;
         }
