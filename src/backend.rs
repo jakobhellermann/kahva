@@ -1,5 +1,5 @@
 use crate::jj::Repo;
-use anyhow::Result;
+use color_eyre::Result;
 use jj_cli::formatter::{FormatRecorder, Formatter, PlainTextFormatter};
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigGetError, ConfigGetResultExt};
@@ -153,7 +153,7 @@ fn convert_graph_edge_into_ancestor<K: Clone>(e: &GraphEdge<K>) -> Ancestor<K> {
     }
 }
 
-fn get_node_template(settings: &UserSettings) -> anyhow::Result<Cow<'static, str>, ConfigGetError> {
+fn get_node_template(settings: &UserSettings) -> Result<Cow<'static, str>, ConfigGetError> {
     let symbol = settings.get_string("templates.log_node").optional()?;
     Ok(symbol.map(Cow::Owned).unwrap_or(Cow::Borrowed("builtin_log_node")))
 }

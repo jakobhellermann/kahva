@@ -2,7 +2,8 @@
 
 use crate::backend::{CommitNode, RepoView};
 use crate::jj::Repo;
-use anyhow::Result;
+use color_eyre::Result;
+use color_eyre::eyre::{ContextCompat, eyre};
 use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
 use egui::{DragAndDrop, FontId, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, TextEdit, TextStyle, Vec2, Widget};
@@ -15,12 +16,14 @@ mod backend;
 mod egui_formatter;
 mod jj;
 
-fn main() -> eframe::Result {
+fn main() -> Result<()> {
+    color_eyre::install()?;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200., 400.]),
         ..Default::default()
     };
-    let app = App::load().expect("initial load");
+    let app = App::load()?;
     eframe::run_native(
         "kahva",
         options,
@@ -29,6 +32,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+    .map_err(|e| eyre!("{e}"))?;
+    Ok(())
 }
 
 fn setup_custom_style(ctx: &egui::Context) {
@@ -46,7 +51,8 @@ fn setup_custom_style(ctx: &egui::Context) {
 struct App(UiState, RepoView);
 impl App {
     fn load() -> Result<App> {
-        let repo = Repo::detect_cwd()?.expect("no repo at path");
+        let cwd = std::env::current_dir()?;
+        let repo = Repo::detect(&cwd)?.with_context(|| format!("No repo was found at {}", cwd.display()))?;
         let content = backend::reload(&repo)?;
 
         Ok(App(

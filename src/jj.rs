@@ -30,7 +30,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, ensure};
+use color_eyre::eyre::{Result, ensure, eyre};
 use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
@@ -173,10 +173,10 @@ impl Repo {
         let file_value = starting_commit.tree()?.path_value(&file_path)?;
         let ui_path = self.path_converter.format_file_path(&file_path);
         if file_value.is_absent() {
-            return Err(anyhow!("Path does not belong to repository: {ui_path}"));
+            return Err(eyre!("Path does not belong to repository: {ui_path}"));
         }
         if file_value.is_tree() {
-            return Err(anyhow!("Path exists but is not a regular file: {ui_path}"));
+            return Err(eyre!("Path exists but is not a regular file: {ui_path}"));
         }
 
         let domain = RevsetExpression::all();
@@ -231,7 +231,7 @@ impl Repo {
             .repo
             .view()
             .get_wc_commit_id(self.workspace.workspace_id())
-            .ok_or_else(|| anyhow!("workspace has no checked out commit"))?;
+            .ok_or_else(|| eyre!("workspace has no checked out commit"))?;
         let commit = self.repo.store().get_commit(commit_id)?;
 
         Ok(commit)
@@ -455,7 +455,7 @@ impl Repo {
             let mut diagnostics = RevsetDiagnostics::new();
             let (expression, modifier) =
                 revset::parse_with_modifier(&mut diagnostics, &revset_string, &self.revset_parse_context())
-                    .map_err(|err| anyhow::anyhow!("Invalid `revsets.short-prefixes`: {}", err))?;
+                    .map_err(|err| eyre!("Invalid `revsets.short-prefixes`: {}", err))?;
             let (None | Some(RevsetModifier::All)) = modifier;
             Ok(Some(expression))
         }
@@ -525,8 +525,8 @@ pub(super) fn evaluate_revset_to_single_commit(
     let mut iter = expression.evaluate_to_commits()?.fuse();
     match (iter.next(), iter.next()) {
         (Some(commit), None) => Ok(commit?),
-        (None, _) => Err(anyhow!(r#"Revset "{revision_str}" didn't resolve to any revisions"#)),
-        (Some(_), Some(_)) => Err(anyhow!("{revision_str} resolved to multiple commits")),
+        (None, _) => Err(eyre!(r#"Revset "{revision_str}" didn't resolve to any revisions"#)),
+        (Some(_), Some(_)) => Err(eyre!("{revision_str} resolved to multiple commits")),
     }
 }
 
@@ -542,6 +542,6 @@ fn update_working_copy(
     // warning for most commands (but be an error for the checkout command)
     let stats = workspace
         .check_out(repo.op_id().clone(), old_tree_id.as_ref(), new_commit, options)
-        .map_err(|err| anyhow!("Failed to check out commit {}", new_commit.id().hex()))?;
+        .map_err(|err| eyre!("Failed to check out commit {}", new_commit.id().hex()))?;
     Ok(stats)
 }
