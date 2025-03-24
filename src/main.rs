@@ -10,7 +10,6 @@ use jj_lib::backend::CommitId;
 use renderdag::{LinkLine, NodeLine};
 use std::fmt::Display;
 use std::ops::RangeInclusive;
-use std::path::Path;
 
 mod backend;
 mod egui_formatter;
@@ -47,7 +46,7 @@ fn setup_custom_style(ctx: &egui::Context) {
 struct App(UiState, RepoView);
 impl App {
     fn load() -> Result<App> {
-        let repo = Repo::detect(Path::new("/home/jakob/dev/jj/jj"))?.expect("no repo at path");
+        let repo = Repo::detect_cwd()?.expect("no repo at path");
         let content = backend::reload(&repo)?;
 
         Ok(App(
