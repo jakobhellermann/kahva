@@ -25,7 +25,12 @@ pub struct RepoView {
 }
 
 pub fn reload(repo: &Repo) -> Result<RepoView> {
-    let log_revset = repo.settings().get_string("revsets.log")?;
+    let log_revset = repo
+        .settings()
+        .get_string("revsets.kahva-log")
+        .optional()
+        .transpose()
+        .unwrap_or_else(|| repo.settings().get_string("revsets.log"))?;
 
     let prio_revset = repo
         .settings()
