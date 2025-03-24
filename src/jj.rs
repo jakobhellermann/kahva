@@ -25,12 +25,13 @@ use jj_lib::revset::{
     RevsetParseContext, RevsetWorkspaceContext, UserRevsetExpression,
 };
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::Workspace;
+use jj_lib::workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, ensure, eyre};
+use jj_cli::cli_util::find_workspace_dir;
 use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
@@ -80,11 +81,15 @@ impl Repo {
     }
 
     pub fn load_at(workspace_dir: &Path) -> Result<Repo> {
-        let config_env = ConfigEnv::from_environment();
-        let mut config = config_from_environment(default_config_layers());
-        // TODO(config): workspace loader
-        config_env.reload_user_config(&mut config)?;
-        let config = config_env.resolve_config(&config)?;
+        let mut config_env = ConfigEnv::from_environment();
+        let mut raw_config = config_from_environment(default_config_layers());
+        config_env.reload_user_config(&mut raw_config)?;
+        let maybe_cwd_workspace_loader = DefaultWorkspaceLoaderFactory.create(find_workspace_dir(workspace_dir));
+        if let Ok(loader) = &maybe_cwd_workspace_loader {
+            config_env.reset_repo_path(loader.repo_path());
+            config_env.reload_repo_config(&mut raw_config)?;
+        }
+        let config = config_env.resolve_config(&raw_config)?;
 
         let settings = UserSettings::from_config(config)?;
         let working_copy_factories = jj_lib::workspace::default_working_copy_factories();
