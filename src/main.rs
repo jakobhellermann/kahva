@@ -2,6 +2,7 @@
 
 use crate::backend::{CommitNode, RepoView};
 use crate::jj::Repo;
+use clap::Parser;
 use color_eyre::Result;
 use color_eyre::eyre::{ContextCompat, eyre};
 use eframe::egui::{self, Color32, Theme};
@@ -12,19 +13,29 @@ use jj_lib::ref_name::RefNameBuf;
 use renderdag::{LinkLine, NodeLine};
 use std::fmt::Display;
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 
 mod backend;
 mod egui_formatter;
 mod jj;
 
+#[derive(clap::Parser)]
+struct Args {
+    #[arg(long, default_value = std::env::current_dir().unwrap().into_os_string())]
+    repository: PathBuf,
+    #[arg(short = 'r', long, value_name = "REVSETS")]
+    revisions: Option<String>,
+}
+
 fn main() -> Result<()> {
+    let args = Args::parse();
     color_eyre::install()?;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200., 400.]),
         ..Default::default()
     };
-    let app = App::load()?;
+    let app = App::load(args)?;
     eframe::run_native(
         "kahva",
         options,
@@ -51,17 +62,19 @@ fn setup_custom_style(ctx: &egui::Context) {
 
 struct App(UiState, RepoView);
 impl App {
-    fn load() -> Result<App> {
-        let cwd = std::env::current_dir()?;
-        let repo = Repo::detect(&cwd)?.with_context(|| format!("No repo was found at {}", cwd.display()))?;
-        let content = backend::reload(&repo)?;
+    fn load(args: Args) -> Result<App> {
+        let repo = Repo::detect(&args.repository)?
+            .with_context(|| format!("No repo was found at {}", args.repository.display()))?;
+        let content = backend::reload(&repo, &args)?;
 
         let debug = false;
         Ok(App(
             UiState {
+                args,
                 formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), debug)?,
                 repo,
                 style: AppStyle::default(),
+                selected_commits: IndexSet::default(),
                 error: None,
                 initial_sized: false,
                 dirty: false,
@@ -72,6 +85,7 @@ impl App {
 }
 
 struct UiState {
+    args: Args,
     repo: Repo,
     formatter: egui_formatter::ColorFormatter,
     style: AppStyle,
@@ -119,7 +133,7 @@ impl Default for AppStyle {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.0.dirty {
-            let res = self.0.repo.reload().and(backend::reload(&self.0.repo));
+            let res = self.0.repo.reload().and(backend::reload(&self.0.repo, &self.0.args));
             if let Some(repo_view) = self.0.catch(res) {
                 self.1 = repo_view;
             }

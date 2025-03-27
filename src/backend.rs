@@ -1,3 +1,4 @@
+use crate::Args;
 use crate::jj::Repo;
 use color_eyre::Result;
 use jj_cli::formatter::{FormatRecorder, Formatter, PlainTextFormatter};
@@ -24,13 +25,16 @@ pub struct RepoView {
     pub heads: Vec<CommitId>,
 }
 
-pub fn reload(repo: &Repo) -> Result<RepoView> {
-    let log_revset = repo
-        .settings()
-        .get_string("revsets.kahva-log")
-        .optional()
-        .transpose()
-        .unwrap_or_else(|| repo.settings().get_string("revsets.log"))?;
+pub fn reload(repo: &Repo, args: &Args) -> Result<RepoView> {
+    let log_revset = match &args.revisions {
+        Some(revset) => revset,
+        None => &repo
+            .settings()
+            .get_string("revsets.kahva-log")
+            .optional()
+            .transpose()
+            .unwrap_or_else(|| repo.settings().get_string("revsets.log"))?,
+    };
 
     let prio_revset = repo
         .settings()
