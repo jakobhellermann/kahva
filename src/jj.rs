@@ -2,6 +2,8 @@
 
 use chrono::TimeZone as _;
 use futures_executor::block_on_stream;
+use jj_cli::commands::git::push::GitPushArgs;
+use jj_cli::commands::run;
 use jj_cli::commit_templater::{CommitTemplateLanguage, CommitTemplateLanguageExtension};
 use jj_cli::config::{ConfigEnv, config_from_environment, default_config_layers};
 use jj_cli::diff_util::{self, UnifiedDiffOptions, show_diff_summary};
@@ -10,6 +12,7 @@ use jj_cli::revset_util::{self, RevsetExpressionEvaluator};
 use jj_cli::template_builder::{self, TemplateLanguage};
 use jj_cli::template_parser::{TemplateAliasesMap, TemplateDiagnostics};
 use jj_cli::templater::{PropertyPlaceholder, TemplateRenderer};
+use jj_cli::ui::Ui;
 use jj_lib::annotate::FileAnnotation;
 use jj_lib::commit::Commit;
 use jj_lib::config::{ConfigGetError, ConfigGetResultExt, ConfigNamePathBuf, StackedConfig};
@@ -26,6 +29,7 @@ use jj_lib::revset::{
     RevsetParseContext, RevsetWorkspaceContext, UserRevsetExpression,
 };
 use jj_lib::settings::UserSettings;
+use jj_lib::str_util::StringPattern;
 use jj_lib::workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory};
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,7 +37,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, ensure, eyre};
-use jj_cli::cli_util::{WorkspaceCommandEnvironment, find_workspace_dir};
+use jj_cli::cli_util::{CliRunner, CommandHelper, WorkspaceCommandEnvironment, find_workspace_dir};
 use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
@@ -44,6 +48,7 @@ pub struct Repo {
     workspace: Workspace,
     repo: Arc<ReadonlyRepo>,
     settings: UserSettings,
+    ui: Ui,
 
     id_prefix_context: IdPrefixContext,
     path_converter: RepoPathUiConverter,
@@ -53,6 +58,7 @@ pub struct Repo {
     template_aliases_map: TemplateAliasesMap,
 
     immutable_heads_expression: Rc<UserRevsetExpression>,
+    command_helper: CommandHelper,
 }
 
 pub struct DiffState<'a> {
@@ -107,6 +113,8 @@ impl Repo {
             base: workspace.workspace_root().to_owned(),
         };
 
+        let ui = Ui::with_config(settings.config()).map_err(|e| e.error)?;
+
         let revset_aliases_map = load_revset_aliases(settings.config())?;
         #[allow(clippy::arc_with_non_send_sync)]
         let revset_extensions = Arc::new(RevsetExtensions::new());
@@ -116,16 +124,22 @@ impl Repo {
 
         let template_aliases_map = load_template_aliases(settings.config())?;
 
+        let command_helper = CliRunner::new()
+            .get_command_helper(&mut Ui::null(), raw_config)
+            .map_err(|e| e.error)?;
+
         let mut this = Repo {
             repo,
             workspace,
             settings,
+            ui,
             path_converter,
             id_prefix_context,
             revset_aliases_map,
             revset_extensions,
             template_aliases_map,
             immutable_heads_expression: RevsetExpression::root(),
+            command_helper,
         };
 
         this.immutable_heads_expression =
@@ -261,6 +275,25 @@ impl Repo {
         jj_lib::git::export_refs(tx.repo_mut())?;
 
         self.repo = tx.commit("kahva: move bookmark")?;
+
+        Ok(())
+    }
+
+    fn git_push_bookmark(&mut self, pattern: StringPattern) -> Result<()> {
+        jj_cli::commands::git::push::cmd_git_push(&mut self.ui, &self.command_helper, &GitPushArgs {
+            remote: None,
+            bookmark: Vec::new(),
+            all: false,
+            tracked: false,
+            deleted: false,
+            allow_new: true,
+            allow_empty_description: false,
+            allow_private: false,
+            revisions: vec![],
+            change: Vec::new(),
+            dry_run: true,
+        })
+        .map_err(|e| e.error)?;
 
         Ok(())
     }
