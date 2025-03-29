@@ -48,7 +48,12 @@ impl ColorFormatter {
     }
 
     pub fn for_config(config: &StackedConfig, debug: bool) -> Result<Self, ConfigGetError> {
-        let rules = jj_cli::formatter::rules_from_config(config)?;
+        let mut rules = jj_cli::formatter::rules_from_config(config)?;
+        rules.push((vec!["change_id".to_owned()], Style {
+            fg: Some(Color::Magenta),
+            monospace: Some(true),
+            ..Default::default()
+        }));
         Ok(Self::new(Arc::new(rules), debug))
     }
 
@@ -171,6 +176,13 @@ impl ColorFormatter {
                     SetBackgroundColor(new_style.bg.unwrap_or(Color::Reset))
                 )?;*/
                 self.egui_format.color = new_style.bg.map(color_to_egui).unwrap_or_else(default_color);
+            }
+            if new_style.monospace != self.current_style.monospace {
+                let family = match new_style.monospace.unwrap_or(false) {
+                    true => egui::FontFamily::Monospace,
+                    false => egui::FontFamily::Proportional,
+                };
+                self.egui_format.font_id = egui::FontId::new(14.0, family);
             }
             self.current_style = new_style;
         }

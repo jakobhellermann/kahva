@@ -56,9 +56,10 @@ impl App {
         let repo = Repo::detect(&cwd)?.with_context(|| format!("No repo was found at {}", cwd.display()))?;
         let content = backend::reload(&repo)?;
 
+        let debug = false;
         Ok(App(
             UiState {
-                formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), false)?,
+                formatter: egui_formatter::ColorFormatter::for_config(repo.settings().config(), debug)?,
                 repo,
                 style: AppStyle::default(),
                 error: None,
