@@ -18,6 +18,7 @@ use jj_lib::copies::CopyRecords;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::matchers::{EverythingMatcher, Matcher};
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::ref_name::RefName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::{
@@ -26,12 +27,13 @@ use jj_lib::revset::{
 };
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory};
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, ensure, eyre};
-use jj_cli::cli_util::find_workspace_dir;
+use jj_cli::cli_util::{WorkspaceCommandEnvironment, find_workspace_dir};
 use jj_cli::command_error::CommandError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
@@ -242,12 +244,16 @@ impl Repo {
         Ok(commit)
     }
 
-    pub fn move_bookmark(&mut self, bookmark: &str, to: &CommitId) -> Result<()> {
+    pub fn move_bookmark(&mut self, bookmark: &RefName, to: &CommitId) -> Result<()> {
         let mut tx = self.repo.start_transaction();
-        tx.set_tag("bookmark".to_owned(), bookmark.to_owned());
+        tx.set_tag("bookmark".to_owned(), bookmark.as_str().to_owned());
 
         let bookmark_target = tx.repo_mut().get_local_bookmark(&bookmark);
-        ensure!(!bookmark_target.is_absent(), "Bookmark {bookmark} does not exist");
+        ensure!(
+            !bookmark_target.is_absent(),
+            "Bookmark {} does not exist",
+            bookmark.as_str()
+        );
 
         tx.repo_mut()
             .set_local_bookmark_target(bookmark, RefTarget::normal(to.clone()));
@@ -439,13 +445,14 @@ impl Repo {
             chrono::Local::now()
         };
 
-        RevsetParseContext::new(
-            &self.revset_aliases_map,
-            self.settings.user_email(),
-            now.into(),
-            &self.revset_extensions,
-            Some(workspace_context),
-        )
+        RevsetParseContext {
+            aliases_map: &self.revset_aliases_map,
+            local_variables: HashMap::new(),
+            user_email: self.settings.user_email(),
+            date_pattern_context: now.into(),
+            extensions: &self.revset_extensions,
+            workspace: Some(workspace_context),
+        }
     }
 
     fn load_short_prefixes_expression(&self) -> Result<Option<Rc<UserRevsetExpression>>> {

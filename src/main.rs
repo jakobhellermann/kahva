@@ -8,6 +8,7 @@ use eframe::egui::{self, Color32, Theme};
 use egui::epaint::{ColorMode, CubicBezierShape, PathStroke};
 use egui::{DragAndDrop, FontId, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, TextEdit, TextStyle, Vec2, Widget};
 use jj_lib::backend::CommitId;
+use jj_lib::ref_name::RefNameBuf;
 use renderdag::{LinkLine, NodeLine};
 use std::fmt::Display;
 use std::ops::RangeInclusive;
@@ -190,7 +191,7 @@ impl UiState {
 
 #[derive(Debug)]
 enum DropPayload {
-    Bookmark(String),
+    Bookmark(RefNameBuf),
 }
 
 impl UiState {
@@ -247,7 +248,7 @@ impl UiState {
                     for (i, (job, label)) in sections.into_iter().enumerate() {
                         match label.as_deref() {
                             Some("bookmarks") if node.commit_id.is_some() => {
-                                let bookmark = job.text.trim().trim_end_matches("*").to_owned();
+                                let bookmark = RefNameBuf::from(job.text.trim().trim_end_matches("*").to_owned());
                                 ui.dnd_drag_source(id.with(i), DropPayload::Bookmark(bookmark), |ui| ui.label(job));
                             }
                             Some("description") => {
